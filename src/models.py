@@ -1,17 +1,40 @@
 import torch
-from torch import nn
 import torch.nn.functional as F
+
+from torch import nn
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from modules.transformer import TransformerEncoder
 
+bert_tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
+roberta_tokenizer = AutoTokenizer.from_pretrained('roberta-large')
+deberta_tokenizer = AutoTokenizer.from_pretrained('microsoft/deberta-v3-large')
 
 class MULTModel(nn.Module):
     def __init__(self, hyp_params):
-        """
+        '''
         Construct a MulT model.
-        """
+        '''
         super(MULTModel, self).__init__()
         self.orig_d_l, self.orig_d_a, self.orig_d_v = hyp_params.orig_d_l, hyp_params.orig_d_a, hyp_params.orig_d_v
+        self.hyp_params = hyp_params
+        if hyp_params.text_encoder == 'bert':
+            self.orig_d_l = 768
+        elif hyp_params.text_encoder == 'roberta':
+            self.orig_d_l = 1024
+        elif hyp_params.text_encoder == 'deberta':
+            self.orig_d_l = 1024
+
+        if hyp_params.text_encoder == 'bert':
+            bertconfig = AutoConfig.from_pretrained('bert-base-uncased', output_hidden_states=True)
+            self.bertmodel = AutoModel.from_pretrained('bert-base-uncased', config=bertconfig)
+        elif hyp_params.text_encoder == 'roberta':
+            bertconfig = AutoConfig.from_pretrained('roberta-large', output_hidden_states=True)
+            self.bertmodel = AutoModel.from_pretrained('roberta-large', config=bertconfig)
+        elif hyp_params.text_encoder == 'deberta':
+            bertconfig = AutoConfig.from_pretrained('microsoft/deberta-v3-large', output_hidden_states=True)
+            self.bertmodel = AutoModel.from_pretrained('microsoft/deberta-v3-large', config=bertconfig)
+
         self.d_l, self.d_a, self.d_v = 30, 30, 30
         self.vonly = hyp_params.vonly
         self.aonly = hyp_params.aonly
@@ -28,13 +51,12 @@ class MULTModel(nn.Module):
         self.attn_mask = hyp_params.attn_mask
 
         combined_dim = self.d_l + self.d_a + self.d_v
-
         self.partial_mode = self.lonly + self.aonly + self.vonly
         if self.partial_mode == 1:
             combined_dim = 2 * self.d_l   # assuming d_l == d_a == d_v
         else:
             combined_dim = 2 * (self.d_l + self.d_a + self.d_v)
-        
+
         output_dim = hyp_params.output_dim        # This is actually not a hyperparameter :-)
 
         # 1. Temporal convolutional layers
@@ -78,7 +100,7 @@ class MULTModel(nn.Module):
         elif self_type == 'v_mem':
             embed_dim, attn_dropout = 2*self.d_v, self.attn_dropout
         else:
-            raise ValueError("Unknown network type")
+            raise ValueError('Unknown network type')
         
         return TransformerEncoder(embed_dim=embed_dim,
                                   num_heads=self.num_heads,
@@ -88,15 +110,56 @@ class MULTModel(nn.Module):
                                   res_dropout=self.res_dropout,
                                   embed_dropout=self.embed_dropout,
                                   attn_mask=self.attn_mask)
-            
-    def forward(self, x_l, x_a, x_v):
-        """
+
+    def forward(self, x_l, x_a, x_v, sentences):
+        '''
         text, audio, and vision should have dimension [batch_size, seq_len, n_features]
-        """
+        '''
+
+        if self.hyp_params.text_encoder == 'bert':
+            SENT_LEN = 50
+            bert_details = []
+            for sentence in sentences:
+                encoded_bert_sent = bert_tokenizer.encode_plus(
+                    sentence, max_length=SENT_LEN, add_special_tokens=True, truncation=True, padding='max_length')
+                bert_details.append(encoded_bert_sent)
+
+            bert_sentences = torch.LongTensor([sample['input_ids'] for sample in bert_details]).cuda()
+            bert_sentence_types = torch.LongTensor([sample['token_type_ids'] for sample in bert_details]).cuda()
+            bert_sentence_att_mask = torch.LongTensor([sample['attention_mask'] for sample in bert_details]).cuda()
+
+            x_l = self.bertmodel(
+                input_ids=bert_sentences,
+                attention_mask=bert_sentence_att_mask,
+                token_type_ids=bert_sentence_types)
+            x_l = x_l[0]
+        elif self.hyp_params.text_encoder == 'roberta':
+            sentences = list(sentences)
+            encoded_bert_sent = roberta_tokenizer(sentences, padding=True, truncation=True,
+                                        max_length=roberta_tokenizer.model_max_length, return_tensors='pt')
+            # Bert things are batch_first
+            bert_sentences = torch.cuda.LongTensor(encoded_bert_sent['input_ids'])
+            bert_sentence_att_mask = torch.cuda.LongTensor(encoded_bert_sent['attention_mask'])
+            x_l = self.bertmodel(
+                input_ids=bert_sentences,
+                attention_mask=bert_sentence_att_mask)
+            x_l = x_l[0]
+        elif self.hyp_params.text_encoder == 'deberta':
+            sentences = list(sentences)
+            encoded_bert_sent = deberta_tokenizer(sentences, padding=True, truncation=True,
+                                        max_length=deberta_tokenizer.model_max_length, return_tensors='pt')
+            # Bert things are batch_first
+            bert_sentences = torch.cuda.LongTensor(encoded_bert_sent['input_ids'])
+            bert_sentence_att_mask = torch.cuda.LongTensor(encoded_bert_sent['attention_mask'])
+            x_l = self.bertmodel(
+                input_ids=bert_sentences,
+                attention_mask=bert_sentence_att_mask)
+            x_l = x_l[0]
+
         x_l = F.dropout(x_l.transpose(1, 2), p=self.embed_dropout, training=self.training)
         x_a = x_a.transpose(1, 2)
         x_v = x_v.transpose(1, 2)
-       
+
         # Project the textual/visual/audio features
         proj_x_l = x_l if self.orig_d_l == self.d_l else self.proj_l(x_l)
         proj_x_a = x_a if self.orig_d_a == self.d_a else self.proj_a(x_a)
@@ -137,10 +200,10 @@ class MULTModel(nn.Module):
         
         if self.partial_mode == 3:
             last_hs = torch.cat([last_h_l, last_h_a, last_h_v], dim=1)
-        
+
         # A residual block
         last_hs_proj = self.proj2(F.dropout(F.relu(self.proj1(last_hs)), p=self.out_dropout, training=self.training))
         last_hs_proj += last_hs
-        
+
         output = self.out_layer(last_hs_proj)
         return output, last_hs
