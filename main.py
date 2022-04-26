@@ -49,15 +49,16 @@ parser.add_argument('--num_heads', type=int, default=5,
                     help='number of heads for the transformer network (default: 5)')
 parser.add_argument('--attn_mask', action='store_false',
                     help='use attention mask for Transformer (default: true)')
+parser.add_argument('--text_encoder', type=str, default='glove')
 
 # Tuning
 parser.add_argument('--batch_size', type=int, default=24, metavar='N',
                     help='batch size (default: 24)')
 parser.add_argument('--clip', type=float, default=0.8,
                     help='gradient clip value (default: 0.8)')
-parser.add_argument('--lr', type=float, default=1e-3,
+parser.add_argument('--lr', type=float, default=1e-5,
                     help='initial learning rate (default: 1e-3)')
-parser.add_argument('--optim', type=str, default='Adam',
+parser.add_argument('--optim', type=str, default='AdamW',
                     help='optimizer to use (default: Adam)')
 parser.add_argument('--num_epochs', type=int, default=40,
                     help='number of epochs (default: 40)')
@@ -91,11 +92,6 @@ use_cuda = False
 output_dim_dict = {
     'mosi': 1,
     'mosei_senti': 1,
-    'iemocap': 8
-}
-
-criterion_dict = {
-    'iemocap': 'CrossEntropyLoss'
 }
 
 torch.set_default_tensor_type('torch.FloatTensor')
@@ -144,9 +140,6 @@ hyp_params.batch_chunk = args.batch_chunk
 hyp_params.n_train, hyp_params.n_valid, hyp_params.n_test = len(train_data), len(valid_data), len(test_data)
 hyp_params.model = str.upper(args.model.strip())
 hyp_params.output_dim = output_dim_dict.get(dataset, 1)
-hyp_params.criterion = criterion_dict.get(dataset, 'L1Loss')
-
 
 if __name__ == '__main__':
     test_loss = train.initiate(hyp_params, train_loader, valid_loader, test_loader)
-
